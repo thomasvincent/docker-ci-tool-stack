@@ -1,54 +1,71 @@
+# Copyright (c) 2014-2017 Sonatype, Inc.
+# Copyright (c) 2017-present Thomas Vincent
 #
-# Creates a docker container with Nexus Artifact Repository
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-FROM centos:7
+FROM       centos:centos7
+MAINTAINER Thomas Vincent <thomasvincent@gmail.com>
+LABEL vendor=Sonatype \
+  com.sonatype.license="Apache License, Version 2.0" \
+  com.sonatype.name="Nexus Repository Manager OSS base image"
 
-MAINTAINER Marcel Birkner <marcel.birkner@codecentric.de>
+ARG NEXUS_VERSION=2.14.5-02
+ARG NEXUS_DOWNLOAD_URL=https://download.sonatype.com/nexus/oss/nexus-${NEXUS_VERSION}-bundle.tar.gz
 
-ENV SONATYPE_WORK /sonatype-work
-ENV NEXUS_VERSION 2.14.1-01
-ENV NEXUS_HOME /opt/sonatype/nexus/
+ENV SONATYPE_WORK=/sonatype-work \
+    JAVA_HOME=/opt/java \
+    JAVA_VERSION_MAJOR=8 \
+    JAVA_VERSION_MINOR=144 \
+    JAVA_VERSION_BUILD=01 \
+    JAVA_DOWNLOAD_HASH=090f390dda5b47b9b721c7dfaa008135
 
-RUN INSTALL_PKGS="java-1.8.0-openjdk.x86_64" && \
-    yum -y --setopt=tsflags=nodocs install $INSTALL_PKGS && \
-    rpm -V $INSTALL_PKGS && \
-    yum clean all  && \
-    localedef -f UTF-8 -i en_US en_US.UTF-8
+ENV JAVA_URL=http://download.oracle.com/otn-pub/java/jdk/${JAVA_VERSION_MAJOR}u${JAVA_VERSION_MINOR}-b${JAVA_VERSION_BUILD}/${JAVA_DOWNLOAD_HASH}/server-jre-${JAVA_VERSION_MAJOR}u${JAVA_VERSION_MINOR}-linux-x64.tar.gz
 
-# Install packages necessary
-RUN yum -y install unzip && yum clean all
+RUN yum install -y \
+  curl tar createrepo \
+  && yum clean all
 
-ADD https://download.sonatype.com/nexus/oss/nexus-${NEXUS_VERSION}-bundle.zip nexus-${NEXUS_VERSION}-bundle.zip
+# install Oracle JRE
+RUN mkdir -p /opt \
+  && curl --fail --silent --location --retry 3 \
+  --header "Cookie: oraclelicense=accept-securebackup-cookie; " \
+  ${JAVA_URL} \
+  | gunzip \
+  | tar -x -C /opt \
+  && ln -s /opt/jdk1.${JAVA_VERSION_MAJOR}.0_${JAVA_VERSION_MINOR} ${JAVA_HOME}
 
-# Extract Nexus
-RUN set -x \
-	&& unzip nexus-${NEXUS_VERSION}-bundle.zip \
-  && mkdir -p ${NEXUS_HOME} \
-	&& cp -r nexus-${NEXUS_VERSION}/* ${NEXUS_HOME} \
-	&& rm -rf nexus-${NEXUS_VERSION}-bundle.tar.gz \
-  && rm -rf nexus-${NEXUS_VERSION}
+RUN mkdir -p /opt/sonatype/nexus \
+  && curl --fail --silent --location --retry 3 \
+    ${NEXUS_DOWNLOAD_URL} \
+  | gunzip \
+  | tar x -C /tmp nexus-${NEXUS_VERSION} \
+  && mv /tmp/nexus-${NEXUS_VERSION}/* /opt/sonatype/nexus/ \
+  && rm -rf /tmp/nexus-${NEXUS_VERSION}
 
-RUN groupadd -r nexus -g 3001 && \
-    useradd -u 3001 -r -g nexus -m -d ${SONATYPE_WORK} -s /bin/bash -c "Nexus Run User" nexus
+RUN useradd -r -u 200 -m -c "nexus role account" -d ${SONATYPE_WORK} -s /bin/false nexus
 
 VOLUME ${SONATYPE_WORK}
 
 EXPOSE 8081
 
 WORKDIR /opt/sonatype/nexus
-
-RUN INSTALL_PKGS="createrepo" && \
-    yum -y --setopt=tsflags=nodocs install $INSTALL_PKGS && \
-    rpm -V $INSTALL_PKGS && \
-    yum clean all
-
-ENV CONTEXT_PATH /
+USER nexus
+ENV CONTEXT_PATH /nexus
 ENV MAX_HEAP 768m
 ENV MIN_HEAP 256m
-ENV JAVA_OPTS -server -XX:MaxPermSize=192m -Djava.net.preferIPv4Stack=true
+ENV JAVA_OPTS -server -Djava.net.preferIPv4Stack=true
 ENV LAUNCHER_CONF ./conf/jetty.xml ./conf/jetty-requestlog.xml
-CMD java \
+CMD ${JAVA_HOME}/bin/java \
   -Dnexus-work=${SONATYPE_WORK} -Dnexus-webapp-context-path=${CONTEXT_PATH} \
   -Xms${MIN_HEAP} -Xmx${MAX_HEAP} \
   -cp 'conf/:lib/*' \

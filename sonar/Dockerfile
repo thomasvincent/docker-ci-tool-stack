@@ -1,29 +1,81 @@
+# Copyright (c) 2016-2017 Sonatype, Inc.
+# Copyright (c) Thomas Vincent
 #
-# Creates a docker container with SonarQube, incl. several plugins
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-FROM centos:7
+FROM centos:centos7
 
-MAINTAINER Marcel Birkner <marcel.birkner@codecentric.de>
+MAINTAINER Thomas Vincent <thomasvincent@gmail.com>
 
-ENV JAVA_OPTS "$JAVA_OPTS -Duser.country=DE -Duser.language=de -Duser.timezone=Europe/Berlin"
+LABEL vendor=Sonatype \
+      com.sonatype.license="Apache License, Version 2.0" \
+      com.sonatype.name="Nexus Repository Manager base image"
 
-# Set the JAVA_HOME variable to make it clear where Java is located
-ENV JAVA_HOME /usr/lib/jvm/java-1.8.0
+ARG NEXUS_VERSION=3.6.0-02
+ARG NEXUS_DOWNLOAD_URL=https://download.sonatype.com/nexus/3/nexus-${NEXUS_VERSION}-unix.tar.gz
+ARG NEXUS_DOWNLOAD_SHA256_HASH=40b95b097b43cc8941a9700d24baf25ef94867286e43eaffa37cf188726bb2a7
 
-ENV SONAR_VERSION 5.6.3
-ENV SONARQUBE_HOME /opt/sonarqube
+ENV JAVA_HOME=/opt/java \
+    JAVA_VERSION_MAJOR=8 \
+    JAVA_VERSION_MINOR=152 \
+    JAVA_VERSION_BUILD=16 \
+    JAVA_DOWNLOAD_HASH=aa0333dd3019491ca4f6ddbe78cdb6d0
 
-# Plugin Versions
-ENV SONAR_JAVA_PLUGIN 4.2
-ENV SONAR_WEB_PLUGIN 2.4
-ENV SONAR_SCM_GIT_PLUGIN 1.0
+ENV JAVA_URL=http://download.oracle.com/otn-pub/java/jdk/${JAVA_VERSION_MAJOR}u${JAVA_VERSION_MINOR}-b${JAVA_VERSION_BUILD}/${JAVA_DOWNLOAD_HASH}/server-jre-${JAVA_VERSION_MAJOR}u${JAVA_VERSION_MINOR}-linux-x64.tar.gz \
+    JAVA_DOWNLOAD_SHA256_HASH=e8a341ce566f32c3d06f6d0f0eeea9a0f434f538d22af949ae58bc86f2eeaae4
 
-RUN INSTALL_PKGS="java-1.8.0-openjdk.x86_64" && \
-    yum -y --setopt=tsflags=nodocs install $INSTALL_PKGS && \
-    rpm -V $INSTALL_PKGS && \
-    yum clean all  && \
-    localedef -f UTF-8 -i en_US en_US.UTF-8
+# configure nexus runtime
+ENV SONATYPE_DIR=/opt/sonatype
+ENV NEXUS_HOME=${SONATYPE_DIR}/nexus \
+    NEXUS_DATA=/nexus-data \
+    NEXUS_CONTEXT='' \
+    SONATYPE_WORK=${SONATYPE_DIR}/sonatype-work
+
+ARG NEXUS_REPOSITORY_MANAGER_COOKBOOK_VERSION="release-0.3.0-01"
+ARG NEXUS_REPOSITORY_MANAGER_COOKBOOK_URL="https://github.com/sonatype/chef-nexus-repository-manager/releases/download/${NEXUS_REPOSITORY_MANAGER_COOKBOOK_VERSION}/chef-nexus-repository-manager.tar.gz"
+
+COPY solo.json.erb /var/chef/solo.json.erb
+
+# Install using chef-solo
+RUN curl -L https://www.getchef.com/chef/install.sh | bash \
+    && /opt/chef/embedded/bin/erb /var/chef/solo.json.erb > /var/chef/solo.json \
+    && chef-solo \
+       --recipe-url ${NEXUS_REPOSITORY_MANAGER_COOKBOOK_URL} \
+       --json-attributes /var/chef/solo.json \
+    && rpm -qa *chef* | xargs rpm -e \
+    && rpm --rebuilddb \
+    && rm -rf /etc/chef \
+    && rm -rf /opt/chefdk \
+    && rm -rf /var/cache/yum \
+    && rm -rf /var/chef
+
+VOLUME ${NEXUS_DATA}
+WORKDIR $SONATYPE_DIR
+
+VOLUME [ "${NEXUS_DATA}","$SONATYPE_DIR/conf","$SONATYPE_DIR/logs"]
+
+RUN chmod -R 777 $SONATYPE_DIR
+
+VOLUME ["$SONATYPE_DIR/data","$SONATYPE_DIR/conf","$SONATYPE_DIR/logs"]
+
+RUN chmod -R 777 $SONATYPE_DIR
+
+# Add plugins
+RUN mkdir -p $SONATYPE_DIR/extensions/plugins/
+COPY http://central.maven.org/maven2/org/sonarsource/java/sonar-java-plugin/${SONAR_JAVA_PLUGIN}/sonar-java-plugin-${SONAR_JAVA_PLUGIN}.jar $SONATYPE_DIR/extensions/plugins/sonar-java-plugin-${SONAR_JAVA_PLUGIN}.jar
+COPY http://central.maven.org/maven2/org/sonarsource/sonar-web-plugin/sonar-web-plugin/${SONAR_WEB_PLUGIN}/sonar-web-plugin-${SONAR_WEB_PLUGIN}.jar $SONATYPE_DIR/extensions/plugins/sonar-web-plugin-${SONAR_WEB_PLUGIN}.jar
+COPY http://central.maven.org/maven2/org/codehaus/sonar-plugins/sonar-scm-git-plugin/${SONAR_SCM_GIT_PLUGIN}/sonar-scm-git-plugin-${SONAR_SCM_GIT_PLUGIN}.jar $SONATYPE_DIR/extensions/plugins/sonar-scm-git-plugin-${SONAR_SCM_GIT_PLUGIN}.jar
+COPY run.sh $SONATYPE_DIR
 
 # Http port
 EXPOSE 9000
@@ -31,29 +83,8 @@ EXPOSE 9000
 # H2 Database port
 EXPOSE 9092
 
-# Install packages necessary
-RUN yum -y install unzip && yum clean all
+USER nexus
 
-# Add SonarQube binaries from Nexus Repository
-ADD https://sonarsource.bintray.com/Distribution/sonarqube/sonarqube-${SONAR_VERSION}.zip $SONARQUBE_HOME/sonarqube-${SONAR_VERSION}.zip
+ENV INSTALL4J_ADD_VM_PARAMS="-Xms1200m -Xmx1200m -XX:MaxDirectMemorySize=2g -Djava.util.prefs.userRoot=${NEXUS_DATA}/javaprefs"
 
-# Unpack SonarQube Zip
-RUN set -x \
-	&& unzip $SONARQUBE_HOME/sonarqube-${SONAR_VERSION}.zip \
-	&& mv sonarqube-${SONAR_VERSION}/* $SONARQUBE_HOME \
-	&& rm $SONARQUBE_HOME/sonarqube-${SONAR_VERSION}.zip
-
-# Add plugins
-RUN mkdir -p $SONARQUBE_HOME/extensions/plugins/
-ADD http://central.maven.org/maven2/org/sonarsource/java/sonar-java-plugin/${SONAR_JAVA_PLUGIN}/sonar-java-plugin-${SONAR_JAVA_PLUGIN}.jar $SONARQUBE_HOME/extensions/plugins/sonar-java-plugin-${SONAR_JAVA_PLUGIN}.jar
-ADD http://central.maven.org/maven2/org/sonarsource/sonar-web-plugin/sonar-web-plugin/${SONAR_WEB_PLUGIN}/sonar-web-plugin-${SONAR_WEB_PLUGIN}.jar $SONARQUBE_HOME/extensions/plugins/sonar-web-plugin-${SONAR_WEB_PLUGIN}.jar
-ADD http://central.maven.org/maven2/org/codehaus/sonar-plugins/sonar-scm-git-plugin/${SONAR_SCM_GIT_PLUGIN}/sonar-scm-git-plugin-${SONAR_SCM_GIT_PLUGIN}.jar $SONARQUBE_HOME/extensions/plugins/sonar-scm-git-plugin-${SONAR_SCM_GIT_PLUGIN}.jar
-COPY run.sh $SONARQUBE_HOME
-
-WORKDIR $SONARQUBE_HOME
-
-VOLUME ["$SONARQUBE_HOME/data","$SONARQUBE_HOME/conf","$SONARQUBE_HOME/logs"]
-
-RUN chmod -R 777 $SONARQUBE_HOME
-
-CMD ["/opt/sonarqube/run.sh"]
+CMD ["sh", "-c", "${SONATYPE_DIR}/start-nexus-repository-manager.sh"]
